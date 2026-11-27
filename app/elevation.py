@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -20,47 +21,77 @@ class ElevationError(Exception):
 
 
 class OpenMeteoElevation:
-    """Copernicus DEM (90 m) elevations from the free Open-Meteo API."""
+    """Copernicus DEM (90 m) elevations from the free Open-Meteo API.
+
+    The free API is rate limited, so rate-limited / failing batches are
+    retried with backoff and, if they still fail, returned as ``None`` so the
+    caller can interpolate over the gaps instead of losing all elevation data.
+    """
 
     attribution = "Elevation data: Copernicus DEM GLO-90 via Open-Meteo.com (CC BY 4.0)"
     batch_size = 100
+    max_retries = 2
+    retry_delay_s = 1.0
+    max_retry_delay_s = 5.0
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient):
         self.base_url = settings.open_meteo_base_url.rstrip("/")
         self.client = client
 
-    async def lookup(self, points: Sequence[LatLon]) -> list[float]:
-        out: list[float] = []
+    async def lookup(self, points: Sequence[LatLon]) -> list[float | None]:
+        """Elevations for ``points``; entries are ``None`` where data is unavailable.
+
+        Raises :class:`ElevationError` only if no elevation at all could be fetched.
+        """
+        out: list[float | None] = []
+        errors: list[str] = []
         for i in range(0, len(points), self.batch_size):
             batch = points[i : i + self.batch_size]
-            params = {
-                "latitude": ",".join(f"{p[0]:.5f}" for p in batch),
-                "longitude": ",".join(f"{p[1]:.5f}" for p in batch),
-            }
+            try:
+                values = await self._fetch_batch(batch)
+            except ElevationError as exc:
+                errors.append(str(exc))
+                values = [None] * len(batch)
+            out.extend(None if v is None else float(v) for v in values)
+        if not any(v is not None for v in out):
+            reason = errors[0] if errors else "no elevation data for this area"
+            raise ElevationError(f"Elevation lookup failed: {reason}")
+        return out
+
+    async def _fetch_batch(self, batch: Sequence[LatLon]) -> list[float | None]:
+        params = {
+            "latitude": ",".join(f"{p[0]:.5f}" for p in batch),
+            "longitude": ",".join(f"{p[1]:.5f}" for p in batch),
+        }
+        for attempt in range(self.max_retries + 1):
             try:
                 resp = await self.client.get(f"{self.base_url}/v1/elevation", params=params)
-                resp.raise_for_status()
-                values = resp.json()["elevation"]
-            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-                raise ElevationError(f"Elevation lookup failed: {exc}") from exc
-            if len(values) != len(batch):
-                raise ElevationError("Elevation lookup returned an unexpected number of values")
-            out.extend(values)
-        return _fill_missing(out)
+            except httpx.HTTPError as exc:
+                error = f"{type(exc).__name__}"
+                delay = self.retry_delay_s * 2**attempt
+            else:
+                if resp.status_code == 200:
+                    try:
+                        values = resp.json()["elevation"]
+                    except (ValueError, KeyError, TypeError) as exc:
+                        raise ElevationError(f"unexpected response ({exc})") from exc
+                    if not isinstance(values, list) or len(values) != len(batch):
+                        raise ElevationError("unexpected number of values")
+                    return values
+                error = f"HTTP {resp.status_code}" + (" (rate limited)" if resp.status_code == 429 else "")
+                if resp.status_code != 429 and resp.status_code < 500:
+                    raise ElevationError(error)
+                delay = _retry_after(resp) or self.retry_delay_s * 2**attempt
+            if attempt < self.max_retries:
+                await asyncio.sleep(min(delay, self.max_retry_delay_s))
+        raise ElevationError(error)
 
 
-def _fill_missing(values: list[float | None]) -> list[float]:
-    known = [v for v in values if v is not None]
-    if not known:
-        raise ElevationError("No elevation data for this area")
-    last = known[0]
-    filled = []
-    for v in values:
-        if v is None:
-            v = last
-        filled.append(float(v))
-        last = v
-    return filled
+def _retry_after(resp: httpx.Response) -> float | None:
+    try:
+        return max(0.0, float(resp.headers["retry-after"]))
+    except (KeyError, ValueError):
+        return None
 
 
 @dataclass

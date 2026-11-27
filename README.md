@@ -29,6 +29,8 @@ Two interfaces are served by the same process:
 ## Quick start
 
 ```bash
+python3 -m venv venv                # isolated environment (venv/ is git-ignored)
+source venv/bin/activate            # Windows: venv\Scripts\activate
 pip install -r requirements-dev.txt
 python -m app                       # serves on http://localhost:8000 (PORT env var honoured)
 pytest                              # tests use a mocked upstream, no network needed
@@ -126,9 +128,15 @@ or call `/route/compare` to try them all.
 ### Elevation
 
 Providers with native elevation (ORS, GraphHopper) are used as-is. Otherwise the
-track is sampled every ~30 m (max 1000 samples) and looked up in the free
-**Open-Meteo elevation API** (Copernicus GLO-90 DEM). Gain/loss uses a 1.5 m
-hysteresis on a 25 m resampled profile to suppress DEM noise.
+track is sampled every ~60 m (max 300 samples, i.e. at most 3 requests) and looked
+up in the free **Open-Meteo elevation API** (Copernicus GLO-90 DEM). Gain/loss uses a
+1.5 m hysteresis on a 25 m resampled profile to suppress DEM noise.
+
+Open-Meteo is rate limited (HTTP 429). Rate-limited or failed requests are retried
+with backoff (honouring `Retry-After`); if some batches still fail, the missing
+samples are interpolated from the ones that succeeded and a warning says the stats
+are approximate. Elevation is only reported as unavailable when no samples at all
+could be fetched, and the route itself never fails because of elevation.
 
 ### Pedestrian friendliness (0-100)
 
@@ -208,7 +216,7 @@ The repository contains `railway.json` (Railpack builder, start command
 | `GRAPHHOPPER_API_KEY` / `GRAPHHOPPER_BASE_URL` | - / `https://graphhopper.com/api/1` | GraphHopper. |
 | `NOMINATIM_BASE_URL` / `NOMINATIM_USER_AGENT` | public Nominatim / project UA | Geocoder (max 1 request/s enforced, results cached). |
 | `ELEVATION_PROVIDER` | `open-meteo` | `open-meteo` or `none`. |
-| `ELEVATION_SAMPLE_SPACING_M` / `ELEVATION_MAX_SAMPLES` | `30` / `1000` | Elevation sampling. |
+| `ELEVATION_SAMPLE_SPACING_M` / `ELEVATION_MAX_SAMPLES` | `60` / `300` | Elevation sampling (the DEM is ~90 m resolution; fewer samples = fewer Open-Meteo requests). |
 | `GPX_TTL_SECONDS` / `GPX_MAX_ENTRIES` | 7 days / `1000` | In-memory GPX link retention (lost on restart; `/route.gpx` links are stateless). |
 | `MAX_STOPS` | `25` | Maximum stops per request. |
 | `HTTP_TIMEOUT_S` / `MAX_CONCURRENT_LEGS` | `30` / `4` | Upstream timeouts and parallelism. |

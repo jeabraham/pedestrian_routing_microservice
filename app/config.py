@@ -49,8 +49,8 @@ class Settings:
     # "open-meteo" or "none"
     elevation_provider: str = "open-meteo"
     open_meteo_base_url: str = "https://api.open-meteo.com"
-    elevation_sample_spacing_m: float = 30.0
-    elevation_max_samples: int = 1000
+    elevation_sample_spacing_m: float = 60.0
+    elevation_max_samples: int = 300
 
     public_base_url: str | None = None
     api_key: str | None = None

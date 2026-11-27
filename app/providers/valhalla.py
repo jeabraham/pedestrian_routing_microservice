@@ -121,7 +121,7 @@ class ValhallaProvider(RoutingProvider):
             for leg in legs:
                 body = {
                     "encoded_polyline": leg["shape"],
-                    "shape_match": "edge_walk",
+                    "shape_match": "walk_or_snap",
                     "costing": "pedestrian",
                     "units": "kilometers",
                     "filters": {

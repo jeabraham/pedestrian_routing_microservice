@@ -273,8 +273,18 @@ class RoutePlanner:
         except ElevationError as exc:
             warnings.append(f"Elevation unavailable: {exc}")
             return None
+        known = [(d, v) for d, v in zip(sample_d, values) if v is not None]
+        if not known:
+            warnings.append("Elevation unavailable: no elevation data for this route")
+            return None
+        if len(known) < len(values):
+            pct = 100 * len(known) / len(values)
+            warnings.append(
+                f"Elevation partially available ({pct:.0f}% of samples); gaps were interpolated, "
+                "so elevation stats may be approximate."
+            )
         attribution.append(self.elevation.attribution)
-        all_ele = interpolate_values(sample_d, values, cum)
+        all_ele = interpolate_values([d for d, _ in known], [v for _, v in known], cum)
         return [all_ele[offsets[i] : offsets[i] + len(leg.coords)] for i, leg in enumerate(legs)]
 
     def _segment_stats(

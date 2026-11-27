@@ -158,6 +158,28 @@ def test_elevation_failure_is_a_warning(client, upstream):
     assert any("Elevation unavailable" in w for w in data["warnings"])
 
 
+def test_elevation_rate_limit_is_retried(client, upstream):
+    upstream.elevation_statuses = [429]
+    r = _route(client, [COORD_A, COORD_B])
+    assert r.status_code == 200
+    data = r.json()
+    assert data["summary"]["elevation_gain_m"] is not None
+    assert not any("levation" in w for w in data["warnings"])
+    assert sum(q.url.host == "elevation.test" for q in upstream.requests) == 2
+
+
+def test_partial_elevation_is_interpolated(make_client, settings_with, upstream):
+    # Small spacing -> several batches; the second batch stays rate limited.
+    with make_client(settings_with(elevation_sample_spacing_m=5.0, elevation_max_samples=1000)) as c:
+        upstream.elevation_statuses = [200, 429, 429, 429]
+        r = _route(c, [COORD_A, COORD_B])
+        assert r.status_code == 200
+        data = r.json()
+        assert sum(q.url.host == "elevation.test" for q in upstream.requests) >= 5
+        assert data["summary"]["elevation_gain_m"] is not None
+        assert any("partially available" in w for w in data["warnings"])
+
+
 def test_too_many_stops(make_client, settings_with):
     with make_client(settings_with(max_stops=2)) as c:
         r = _route(c, [COORD_A, COORD_B, COORD_A])

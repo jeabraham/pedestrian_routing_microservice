@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.elevation import OpenMeteoElevation
 from app.main import create_app
 from app.planner import RoutePlanner
 
@@ -55,6 +56,8 @@ class FakeUpstream:
         self.requests: list[httpx.Request] = []
         self.fail_hosts: set[str] = set()
         self.fail_paths: set[str] = set()
+        # Status codes for successive elevation requests (200 = normal answer).
+        self.elevation_statuses: list[int] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -69,6 +72,9 @@ class FakeUpstream:
                 return httpx.Response(200, json=[{"lat": str(lat), "lon": str(lon), "display_name": name}])
             return httpx.Response(200, json=[])
         if host == "elevation.test":
+            status = self.elevation_statuses.pop(0) if self.elevation_statuses else 200
+            if status != 200:
+                return httpx.Response(status, headers={"Retry-After": "0"}, json={"reason": "Too many requests"})
             lats = [float(x) for x in request.url.params["latitude"].split(",")]
             lons = [float(x) for x in request.url.params["longitude"].split(",")]
             assert len(lats) <= 100
@@ -196,6 +202,11 @@ class FakeUpstream:
                 },
             )
         return httpx.Response(404, json={"message": f"unexpected request {request.url}"})
+
+
+@pytest.fixture(autouse=True)
+def _no_elevation_retry_delay(monkeypatch):
+    monkeypatch.setattr(OpenMeteoElevation, "retry_delay_s", 0.0)
 
 
 @pytest.fixture
