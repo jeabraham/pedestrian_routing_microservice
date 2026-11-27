@@ -18,7 +18,7 @@ import httpx
 from app.config import Settings
 from app.models import GeocodeResult
 
-_COORD_RE = re.compile(r"(?:geo:)?\s*([-+]?\d+(?:\.\d+)?)(?:\s*[,;]\s*|\s+)([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
 
 
 class GeocodingError(Exception):
@@ -30,10 +30,12 @@ def parse_coordinates(text: str) -> tuple[float, float] | None:
     text = text.strip()
     if len(text) > 100:
         return None
-    match = _COORD_RE.fullmatch(text)
-    if not match:
+    body = text[4:] if text[:4].lower() == "geo:" else text
+    body = body.replace(";", ",")
+    parts = [p.strip() for p in body.split(",")] if "," in body else body.split()
+    if len(parts) != 2 or not all(_NUMBER_RE.fullmatch(p) for p in parts):
         return None
-    lat, lon = float(match.group(1)), float(match.group(2))
+    lat, lon = float(parts[0]), float(parts[1])
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise GeocodingError(f"Coordinates out of range (expected 'latitude,longitude'): {text!r}")
     return lat, lon
