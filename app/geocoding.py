@@ -18,7 +18,7 @@ import httpx
 from app.config import Settings
 from app.models import GeocodeResult
 
-_COORD_RE = re.compile(r"^\s*(?:geo:)?\s*([-+]?\d+(?:\.\d+)?)\s*[,;\s]\s*([-+]?\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+_COORD_RE = re.compile(r"(?:geo:)?\s*([-+]?\d+(?:\.\d+)?)(?:\s*[,;]\s*|\s+)([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 
 
 class GeocodingError(Exception):
@@ -27,7 +27,10 @@ class GeocodingError(Exception):
 
 def parse_coordinates(text: str) -> tuple[float, float] | None:
     """Parse ``"lat,lon"``; returns ``None`` if the text is not a coordinate pair."""
-    match = _COORD_RE.match(text)
+    text = text.strip()
+    if len(text) > 100:
+        return None
+    match = _COORD_RE.fullmatch(text)
     if not match:
         return None
     lat, lon = float(match.group(1)), float(match.group(2))
