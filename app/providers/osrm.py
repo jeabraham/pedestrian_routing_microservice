@@ -12,7 +12,7 @@ from collections import defaultdict
 
 from app.geo import LatLon
 from app.models import RouteOptions
-from app.providers.base import FERRY, LegRoute, RoutingError, RoutingProvider
+from app.providers.base import LegRoute, RoutingError, RoutingProvider
 
 _TURN_TYPES = {"turn", "end of road", "fork", "roundabout", "rotary", "roundabout turn", "new name", "continue"}
 
@@ -47,7 +47,7 @@ class OSRMProvider(RoutingProvider):
 
         turn_count = 0
         streets: dict[str, float] = defaultdict(float)
-        way_types: dict[str, float] = {}
+        ferry_m = 0.0
         for leg in route.get("legs", []):
             for step in leg.get("steps", []):
                 maneuver = step.get("maneuver", {})
@@ -57,12 +57,15 @@ class OSRMProvider(RoutingProvider):
                 if name:
                     streets[name] += float(step.get("distance", 0.0))
                 if step.get("mode") == "ferry":
-                    way_types[FERRY] = way_types.get(FERRY, 0.0) + float(step.get("distance", 0.0))
+                    ferry_m += float(step.get("distance", 0.0))
+        # OSRM has no way types, so a ferry is reported as a warning rather than as the only
+        # typed distance (which would skew the way-type score).
+        if ferry_m > 0:
+            warnings.append(f"Route includes a ferry crossing ({ferry_m:.0f} m).")
         return LegRoute(
             coords=geometry,
             distance_m=float(route.get("distance", 0.0)),
             duration_s=float(route["duration"]) if route.get("duration") is not None else None,
-            way_types_m=way_types,
             turn_count=turn_count,
             street_lengths_m=dict(streets),
             warnings=warnings,
