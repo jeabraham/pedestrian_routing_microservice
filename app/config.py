@@ -54,6 +54,9 @@ class Settings:
 
     public_base_url: str | None = None
     api_key: str | None = None
+    mcp_oauth_enabled: bool = False
+    mcp_oauth_login_secret: str | None = None
+    mcp_oauth_db_path: str | None = None
     gpx_ttl_seconds: int = 7 * 24 * 3600
     gpx_max_entries: int = 1000
     max_stops: int = 25
@@ -63,6 +66,9 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        oauth_enabled = (_env("MCP_OAUTH_ENABLED", "false") or "").lower()
+        if oauth_enabled not in ("true", "false", "1", "0"):
+            raise ValueError("MCP_OAUTH_ENABLED must be true or false")
         public_base_url = _env("PUBLIC_BASE_URL")
         if public_base_url is None and _env("RAILWAY_PUBLIC_DOMAIN"):
             public_base_url = f"https://{_env('RAILWAY_PUBLIC_DOMAIN')}"
@@ -85,6 +91,9 @@ class Settings:
             elevation_max_samples=_env_int("ELEVATION_MAX_SAMPLES", cls.elevation_max_samples),
             public_base_url=public_base_url.rstrip("/") if public_base_url else None,
             api_key=_env("API_KEY"),
+            mcp_oauth_enabled=oauth_enabled in ("true", "1"),
+            mcp_oauth_login_secret=_env("MCP_OAUTH_LOGIN_SECRET"),
+            mcp_oauth_db_path=_env("MCP_OAUTH_DB_PATH"),
             gpx_ttl_seconds=_env_int("GPX_TTL_SECONDS", cls.gpx_ttl_seconds),
             gpx_max_entries=_env_int("GPX_MAX_ENTRIES", cls.gpx_max_entries),
             max_stops=_env_int("MAX_STOPS", cls.max_stops),

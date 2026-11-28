@@ -175,6 +175,8 @@ available, an agent can simply construct a link like
 `https://<host>/route.gpx?stops=51.0447,-114.0719|Calgary%20Tower,%20Calgary&route_name=My%20walk`.
 
 ChatGPT can also use the MCP endpoint (`/mcp`) as a connector/app in developer mode.
+If ChatGPT only offers OAuth, enable the self-hosted MCP OAuth server as described
+below; the existing `API_KEY` alone is not an OAuth server.
 
 ### Gemini, Claude and other MCP clients
 
@@ -194,12 +196,31 @@ The GPX contains one `<trk>` (single `<trkseg>` with elevation) and a `<wpt>` pe
 
 ## Deploying on Railway
 
-The repository contains `railway.json` (Railpack builder, start command
+The repository contains `railway.json` (Dockerfile builder, start command
 `python -m app`, health check `/health`) and a `Procfile`.
 
 1. *New Project* -> *Deploy from GitHub repo* -> select this repository.
 2. *Settings -> Networking -> Generate Domain*.
 3. Optional variables (below), e.g. `ORS_API_KEY`, `GRAPHHOPPER_API_KEY`, `API_KEY`.
+
+### ChatGPT MCP with OAuth
+
+1. Attach a persistent Railway volume to the service, for example mounted at
+   `/data`. Run one service instance: the OAuth database uses SQLite.
+2. Set `MCP_OAUTH_ENABLED=true`, `MCP_OAUTH_DB_PATH=/data/oauth.sqlite`, and
+   `MCP_OAUTH_LOGIN_SECRET` to a separate, randomly generated secret of at
+   least 32 bytes (for example, generate one locally with `openssl rand -base64 32`).
+   Keep it private and do not reuse `API_KEY`. Ensure `PUBLIC_BASE_URL` is the
+   public HTTPS origin; Railway's public domain is used automatically if unset.
+3. Keep `API_KEY` set to protect the REST API. OAuth protects `/mcp`, but does
+   not protect other API endpoints. Existing API-key clients still work.
+4. In ChatGPT's custom MCP server dialog, enter
+   `https://<your-domain>/mcp`, select OAuth, and create the server. Approve
+   the connection on the service's login page using the OAuth login secret.
+
+OAuth client registrations and tokens persist on the volume. Access tokens
+expire after one hour; refresh tokens expire after 30 days and rotate on use.
+Protect and back up the volume; losing the database requires reconnecting clients.
 
 ### Configuration (environment variables)
 
@@ -208,6 +229,9 @@ The repository contains `railway.json` (Railpack builder, start command
 | `PORT` | `8000` | Listen port (set by Railway). |
 | `PUBLIC_BASE_URL` | `https://$RAILWAY_PUBLIC_DOMAIN` | Absolute base URL for GPX links and the OpenAPI `servers` entry. |
 | `API_KEY` | - | If set, required as `X-API-Key` or `Authorization: Bearer` (except `/health`, `/docs`, `/openapi.json`, `/privacy`, `/gpx/*`). |
+| `MCP_OAUTH_ENABLED` | `false` | Enable the self-hosted OAuth server for `/mcp`. |
+| `MCP_OAUTH_LOGIN_SECRET` | - | Separate, high-entropy login secret of at least 32 bytes, required when OAuth is enabled. |
+| `MCP_OAUTH_DB_PATH` | - | Absolute path to the OAuth SQLite database on a persistent volume, required when OAuth is enabled. |
 | `DEFAULT_PROVIDER` | `osrm` | Provider used when the request names none. |
 | `DISABLED_PROVIDERS` | - | Comma-separated provider ids to hide. |
 | `OSRM_BASE_URL` / `OSRM_PROFILE` | FOSSGIS foot / `foot` | OSRM server. |
