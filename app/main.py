@@ -5,10 +5,15 @@ Run locally with ``uvicorn app.main:app --reload``.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hmac
+import json
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Annotated
+from urllib.parse import parse_qs, unquote, urlencode
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -29,6 +34,7 @@ from app.models import (
     Stop,
 )
 from app.planner import PlanError, RoutePlanner
+from app.oauth import OAuthProvider, StaleOAuthConfiguration
 
 API_DESCRIPTION = """\
 Plan pedestrian (walking) routes through an ordered list of stops and get a GPX
@@ -50,6 +56,9 @@ PUBLIC_PATHS = ("/health", "/openapi.json", "/docs", "/redoc", "/gpx/", "/privac
 
 def create_app(settings: Settings | None = None, planner: RoutePlanner | None = None) -> FastAPI:
     settings = settings or get_settings()
+    if not settings.mcp_oauth_enabled and (settings.mcp_oauth_login_secret or settings.mcp_oauth_db_path):
+        raise ValueError("OAuth credentials configured but MCP_OAUTH_ENABLED is false")
+    oauth = OAuthProvider(settings) if settings.mcp_oauth_enabled else None
     state: dict[str, RoutePlanner] = {}
     if planner is not None:
         state["planner"] = planner
@@ -97,6 +106,73 @@ def create_app(settings: Settings | None = None, planner: RoutePlanner | None = 
     @app.middleware("http")
     async def api_key_auth(request: Request, call_next):
         path = request.url.path
+        if oauth:
+            public_oauth = {
+                "/.well-known/oauth-authorization-server", "/.well-known/oauth-protected-resource",
+                "/.well-known/oauth-protected-resource/mcp",
+                "/authorize", "/token", "/register", "/oauth/login",
+            }
+            if path in public_oauth:
+                if path == "/authorize" and any(len(request.query_params.getlist(k)) != 1 for k in request.query_params):
+                    return JSONResponse({"error": "invalid_request"}, status_code=400)
+                if request.method == "POST":
+                    chunks = []
+                    size = 0
+                    async for chunk in request.stream():
+                        size += len(chunk)
+                        if size > 16384:
+                            return JSONResponse({"detail": "Request too large"}, status_code=413)
+                        chunks.append(chunk)
+                    body = request._body = b"".join(chunks)
+                    if path in {"/token", "/authorize", "/oauth/login"}:
+                        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+                            return JSONResponse({"error": "invalid_request"}, status_code=400)
+                        fields = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+                        if any(len(values) != 1 for values in fields.values()):
+                            return JSONResponse({"error": "invalid_request"}, status_code=400)
+                    if path == "/register" and not oauth.limit("register", 30, 60):
+                        return JSONResponse({"detail": "Too many requests"}, status_code=429)
+                    if path == "/token":
+                        # The SDK requires client_id in the form even for HTTP Basic.
+                        authorization = request.headers.get("authorization", "")
+                        if "client_id" not in fields and authorization.startswith("Basic "):
+                            try:
+                                credentials = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
+                                client_id, _ = credentials.split(":", 1)
+                                fields["client_id"] = [unquote(client_id)]
+                                request._body = urlencode(fields, doseq=True).encode()
+                            except (ValueError, UnicodeDecodeError, binascii.Error):
+                                pass
+                        if "resource" in fields and fields["resource"][0] != oauth.resource:
+                            return JSONResponse({"error": "invalid_target"}, status_code=400)
+                        if fields.get("grant_type") == ["authorization_code"]:
+                            if not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", fields.get("code_verifier", [""])[0]):
+                                return JSONResponse({"error": "invalid_grant"}, status_code=400)
+                response = await call_next(request)
+                if path == "/.well-known/oauth-authorization-server" and request.method == "GET" and response.status_code == 200:
+                    body = b"".join([chunk async for chunk in response.body_iterator])
+                    metadata = json.loads(body)
+                    methods = metadata["token_endpoint_auth_methods_supported"]
+                    if "none" not in methods:
+                        methods.append("none")
+                    headers = dict(response.headers)
+                    headers.pop("content-length", None)
+                    return JSONResponse(metadata, headers=headers)
+                return response
+            if path == "/mcp" or path.startswith("/mcp/"):
+                key = request.headers.get("x-api-key", "")
+                authorization = request.headers.get("authorization", "")
+                bearer = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+                key_valid = bool(settings.api_key and (
+                    hmac.compare_digest(key.encode(), settings.api_key.encode()) or
+                    hmac.compare_digest(bearer.encode(), settings.api_key.encode())
+                ))
+                if request.method != "OPTIONS" and not key_valid and not (bearer and await oauth.load_access_token(bearer)):
+                    return JSONResponse(
+                        {"detail": "Invalid or missing credentials"}, status_code=401,
+                        headers={"WWW-Authenticate": f'Bearer resource_metadata="{oauth.base}/.well-known/oauth-protected-resource/mcp"'},
+                    )
+                return await call_next(request)
         if settings.api_key and path != "/" and not path.startswith(PUBLIC_PATHS) and request.method != "OPTIONS":
             supplied = request.headers.get("x-api-key") or ""
             auth = request.headers.get("authorization") or ""
@@ -105,6 +181,13 @@ def create_app(settings: Settings | None = None, planner: RoutePlanner | None = 
             if not hmac.compare_digest(supplied.encode(), settings.api_key.encode()):
                 return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
         return await call_next(request)
+
+    @app.middleware("http")
+    async def stale_oauth_authentication(request: Request, call_next):
+        try:
+            return await call_next(request)
+        except StaleOAuthConfiguration:
+            return JSONResponse({"detail": "OAuth configuration changed; restart this instance"}, status_code=503)
 
     @app.exception_handler(PlanError)
     async def plan_error_handler(_: Request, exc: PlanError):
@@ -232,6 +315,10 @@ def create_app(settings: Settings | None = None, planner: RoutePlanner | None = 
 
     app.openapi = custom_openapi  # type: ignore[method-assign]
     app.state.get_planner = get_planner
+    if oauth:
+        app.router.routes.extend(oauth.routes())
+        app.add_api_route("/oauth/login", oauth.login_get, methods=["GET"], include_in_schema=False)
+        app.add_api_route("/oauth/login", oauth.login_post, methods=["POST"], include_in_schema=False)
     # The MCP app is mounted last so the REST routes above take precedence.
     app.mount("/", mcp_app)
     return app
